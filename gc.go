@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"time"
 
@@ -25,20 +24,12 @@ import (
 type stringset = map[string]struct{}
 
 func main() {
-	go serveHTTP()
 	ticker := time.NewTicker(time.Hour)
 	for ; true; <-ticker.C {
 		if err := run(); err != nil {
 			slog.Error(err.Error())
 		}
 	}
-}
-
-func serveHTTP() {
-	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	slog.Error(http.ListenAndServe(":8080", nil).Error())
 }
 
 var (
