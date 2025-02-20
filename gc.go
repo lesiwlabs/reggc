@@ -185,6 +185,6 @@ func gcRegistry() error {
 	} else if err != nil {
 		return fmt.Errorf("could not exec registry garbage-collect: %w", err)
 	}
-	slog.Info("gc completed", "output", buf.String())
+	slog.Info("gc completed")
 	return nil
 }
