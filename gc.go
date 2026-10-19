@@ -6,7 +6,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/regclient/regclient"
@@ -24,10 +27,20 @@ import (
 type stringset = map[string]struct{}
 
 func main() {
+	ctx, stop := signal.NotifyContext(
+		context.Background(), os.Interrupt, syscall.SIGTERM,
+	)
+	defer stop()
+
 	ticker := time.NewTicker(time.Hour)
-	for ; true; <-ticker.C {
-		if err := run(); err != nil {
+	for {
+		if err := run(ctx); err != nil && ctx.Err() == nil {
 			slog.Error(err.Error())
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }
@@ -38,7 +51,7 @@ var (
 	rcfg *rest.Config
 )
 
-func run() error {
+func run(ctx context.Context) error {
 	rc = regclient.New(
 		regclient.WithConfigHost(
 			config.Host{Name: "registry:5000", TLS: config.TLSDisabled},
@@ -54,11 +67,11 @@ func run() error {
 		return fmt.Errorf("could not make kubernetes client: %w", err)
 	}
 
-	regimgs, err := fetchRegistryImages()
+	regimgs, err := fetchRegistryImages(ctx)
 	if err != nil {
 		return fmt.Errorf("could not fetch registry images: %w", err)
 	}
-	podimgs, err := fetchPodImages()
+	podimgs, err := fetchPodImages(ctx)
 	if err != nil {
 		return fmt.Errorf("could not fetch pod images: %w", err)
 	}
@@ -68,33 +81,34 @@ func run() error {
 		}
 	}
 	for img := range regimgs {
-		if err := deleteImage(img); err != nil {
+		if err := deleteImage(ctx, img); err != nil {
 			return fmt.Errorf("could not delete image %q: %w", img, err)
 		}
 	}
-	if err := gcRegistry(); err != nil {
+	if err := gcRegistry(ctx); err != nil {
 		return fmt.Errorf("could not trigger registry gc: %w", err)
 	}
 	return nil
 }
 
-func fetchRegistryImages() (stringset, error) {
+func fetchRegistryImages(ctx context.Context) (stringset, error) {
 	// TODO: Also ignore recent uploads here, if possible.
 	// Manifests may have timestamps and could be used for a grace period.
 	imgs := make(stringset)
-	repos, err := rc.RepoList(context.Background(), "registry:5000")
+	repos, err := rc.RepoList(ctx, "registry:5000")
 	if err != nil {
 		return nil, fmt.Errorf("could not get repository list: %w", err)
 	}
 	for _, repo := range repos.RepoRegistryList.Repositories {
-		tags, err := rc.TagList(context.Background(), ref.Ref{
+		tags, err := rc.TagList(ctx, ref.Ref{
 			Scheme:     "reg",
 			Repository: repo,
 			Registry:   "registry:5000",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("could not get tags for repository %q: %w",
-				repo, err)
+				repo, err,
+			)
 		}
 		for _, tag := range tags.Tags {
 			imgs["ctr.lesiw.dev/"+repo+":"+tag] = struct{}{}
@@ -103,10 +117,9 @@ func fetchRegistryImages() (stringset, error) {
 	return imgs, nil
 }
 
-func fetchPodImages() (stringset, error) {
+func fetchPodImages(ctx context.Context) (stringset, error) {
 	imgs := make(stringset)
-	pods, err := k8s.CoreV1().Pods("").List(
-		context.Background(), metav1.ListOptions{})
+	pods, err := k8s.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +131,7 @@ func fetchPodImages() (stringset, error) {
 	return imgs, nil
 }
 
-func deleteImage(img string) error {
+func deleteImage(ctx context.Context, img string) error {
 	_, repotag, ok := strings.Cut(img, "/")
 	if !ok {
 		return fmt.Errorf("could not parse registry from %q", img)
@@ -127,7 +140,7 @@ func deleteImage(img string) error {
 	if !ok {
 		return fmt.Errorf("could not parse repo and tag from %q", repotag)
 	}
-	err := rc.TagDelete(context.Background(), ref.Ref{
+	err := rc.TagDelete(ctx, ref.Ref{
 		Registry:   "registry:5000",
 		Repository: repo,
 		Tag:        tag,
@@ -140,7 +153,7 @@ func deleteImage(img string) error {
 	return nil
 }
 
-func gcRegistry() error {
+func gcRegistry(ctx context.Context) error {
 	req := k8s.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name("registry-0").
@@ -160,7 +173,8 @@ func gcRegistry() error {
 		return fmt.Errorf("could not create spdy executor: %w", err)
 	}
 	wsExec, err := remotecommand.NewWebSocketExecutor(
-		rcfg, "GET", req.URL().String())
+		rcfg, "GET", req.URL().String(),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create websocket executor: %w", err)
 	}
@@ -171,7 +185,7 @@ func gcRegistry() error {
 		},
 	)
 	var buf bytes.Buffer
-	err = exec.StreamWithContext(context.Background(),
+	err = exec.StreamWithContext(ctx,
 		remotecommand.StreamOptions{
 			Stdout: &buf,
 			Stderr: &buf,
