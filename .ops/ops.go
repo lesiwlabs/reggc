@@ -24,5 +24,6 @@ func main() {
 	o := Ops{}
 	o.K8sDefinitions = role
 	o.ServiceAccount = "reggc"
+	o.Memory = 128
 	ops.Handle(o)
 }
